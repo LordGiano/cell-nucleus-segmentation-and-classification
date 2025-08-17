@@ -1,0 +1,26 @@
+﻿Sejtmag szegmentálás és osztályozás
+-----------------------------------
+
+A lenti kép egy, az eszközeink által digitalizált
+szöveti minta egy részlete, sejtmagokat tartalmaz.
+A feladat a képen sejtmagok keresése, osztályozása
+és körvonallal vizualizálása.
+
+Olyan Python modult/csomagot várunk el, melynek van
+olyan függvénye, aminek két paramétere van, a forrás
+és a kiírandó output kép útvonala. Az algoritmus
+detektálja a sejtmagokat, osztályozza őket "barnaság"
+alapján piros, narancssárga, citromsárga és kék
+osztályokba és 1-2 pixeles outline-al meg is jeleníti
+őket, mint a ref.jpg képrészleten is látható.
+
+A feladathoz Python csomagok használhatóak, például
+Numpy, OpenCV, Deep-learning eszközök, Dask, Pandas,
+scikit-image, scikit-learn, Keras, stb. A feldolgozás
+igyekezzék több CPU/GPU magot is kihasználni.
+Az értékelésnél a kód minősége, modernsége és
+ötletessége fontosabb, mint a terjedelme.
+
+Az alábbi címen található a forráskép és annak egy
+részletén megjelenített cél-szegmentációt:
+https://nextcloud.3dhistech.com/s/4WrZCkLNfj4cHoB
