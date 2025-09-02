@@ -94,7 +94,8 @@ def classify_from_mask(mask, D, color_map, method, km=None, remap=None, q=None, 
     return cats, overlay
 
 
-def classify_nuclei(input_path, output_path, method="kmeans"):
+def classify_nuclei(input_path, output_path):
+    method="kmeans"
     bgr = cv2.imread(input_path)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
@@ -155,7 +156,8 @@ def classify_nuclei(input_path, output_path, method="kmeans"):
         cats = {lb: (0 if v<=q[0] else 1 if v<=q[1] else 2 if v<=q[2] else 3)
                 for lb, v in zip(idx, feats[:,0])}
 
-    color_map = {0:(255,0,0), 1:(0,255,255), 2:(0,165,255), 3:(0,0,255)}  # kék, sárga, narancs, piros (BGR)
+    #color_map = {0:(255,0,0), 1:(0,255,255), 2:(0,165,255), 3:(0,0,255)}  # kék, sárga, narancs, piros (BGR)
+    color_map = {0:(255,0,0), 1:(0,255,255), 2:(0,128,255), 3:(0,0,255)}
     out = bgr.copy()
     contours_only = np.zeros_like(bgr)
     contours_per_class = {
