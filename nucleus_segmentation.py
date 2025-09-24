@@ -1,8 +1,13 @@
 import cv2, numpy as np
-from skimage import color
+from skimage import color  as skcolor
 from sklearn.cluster import KMeans
 
 def get_all_cell_mask(img):
+    """
+        Általános sejtmag-maszk készítése (0/255).
+        Lépések: szürkeárnyalat → Gauss-szűrés → küszöbölés → invertálás →
+                 morfológiai nyitás → zárás (lyukak betöltése).
+    """
     # Kép beolvasása
     #img = cv2.imread("src.jpg")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -15,7 +20,7 @@ def get_all_cell_mask(img):
     # Invertálás (hogy a sötét sejtmagok legyenek előtérben = fehérek)
     thresh = cv2.bitwise_not(thresh)
 
-    # Morfológiai tisztítás
+    # # Morfológiai tisztítás: nyitás (zajszűrés), majd zárás (lyukak betöltése)
     kernel = np.ones((3, 3), np.uint8)
     opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
     # opening_otsu = cv2.morphologyEx(thresh_otsu, cv2.MORPH_OPEN, kernel, iterations=2) -> ezzel sok sejtmag elveszik
@@ -31,6 +36,7 @@ def remove_blobs_overlapping_contours(all_cells: np.ndarray,
     bin_all = (all_cells > 0).astype(np.uint8)
 
     # cell_contours -> kontúr-maszk (0/1); bármelyik csatorna > 0 számít "kontúrnak"
+    # RGB esetén bármely csatorna > 0 kontúrnak számít
     if cell_contours.ndim == 3:
         contour_mask = ( (cell_contours[...,0] > 0) |
                          (cell_contours[...,1] > 0) |
@@ -52,6 +58,7 @@ def remove_blobs_overlapping_contours(all_cells: np.ndarray,
     labels_on_contour = labels_on_contour[labels_on_contour != 0]  # 0 = háttér
 
     # Ezen label-ek törlése az all_cells-ből
+    # Érintkező komponensek eltávolítása
     to_remove = np.isin(labels, labels_on_contour)
     result = bin_all.copy()
     result[to_remove] = 0
@@ -60,130 +67,140 @@ def remove_blobs_overlapping_contours(all_cells: np.ndarray,
     return (result * 255).astype(np.uint8)
 
 def classify_from_mask(mask, D, color_map, method, km=None, remap=None, q=None, min_area=80):
-    binmask = (mask > 0).astype(np.uint8)
-    num_labels, labels = cv2.connectedComponents(binmask)
+    # Címkézés a bináris maszkon
+    bin_mask = (mask > 0).astype(np.uint8)
+    num_labels, labels = cv2.connectedComponents(bin_mask)
 
-    feats, idx = [], []
+    # Jellemzők: komponensenkénti DAB-átlag (kis régiók kihagyása)
+    feats, label_ids  = [], []
     for lb in range(1, num_labels):
         m = (labels == lb)
         area = int(m.sum())
         if area < min_area:
             continue
         feats.append([float(D[m].mean())])
-        idx.append(lb)
+        label_ids .append(lb)
 
     overlay = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    if not idx:
+    if not label_ids :
         return {}, overlay
 
     feats = np.asarray(feats)
 
+    # Kategorizálás: KMeans + remap VAGY kvantilis küszöbök (q)
     if method == "kmeans":
-        # UGYANAZT a km + remap párost használd
-        raw = km.predict(feats)
-        cats = {lb: remap[int(c)] for lb, c in zip(idx, raw)}
+        raw = km.predict(feats) # ugyanazt a km + remap párost használjuk
+        class_map = {lid: remap[int(c)] for lid, c in zip(label_ids, raw)}
     else:
-        cats = {lb: (0 if v <= q[0] else 1 if v <= q[1] else 2 if v <= q[2] else 3)
-                for lb, v in zip(idx, feats[:, 0])}
+        class_map = {
+            lid: (0 if v <= q[0] else 1 if v <= q[1] else 2 if v <= q[2] else 3)
+            for lid, v in zip(label_ids, feats[:, 0])
+        }
 
-    for lb in idx:
-        m = (labels == lb).astype(np.uint8)
+    # Kontúrok kirajzolása kategória színével
+    for lid in label_ids:
+        m = (labels == lid).astype(np.uint8)
         cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, cnts, -1, color_map[cats[lb]], thickness=2, lineType=cv2.LINE_8)
+        cv2.drawContours(overlay, cnts, -1, color_map[class_map[lid]], thickness=2, lineType=cv2.LINE_8)
 
-    return cats, overlay
+    return class_map, overlay
 
 
-def classify_nuclei(input_path, output_path):
+def classify_nuclei(input_path, output_path) -> None:
+    """
+    Sejtmagok szegmentálása HED dekonvolúció + watershed, majd DAB-intenzitás szerinti (0..3) osztályozás
+    és kontúrok kirajzolása. Eredmény a `output_path` képfájlba íródik.
+    """
     method="kmeans"
+    # Beolvasás és RGB-re váltás
     bgr = cv2.imread(input_path)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    # OD + HED dekonvolúció
-    img_od = -np.log((rgb.astype(np.float32)+1)/256.0)
-    hed = color.separate_stains(img_od, color.hed_from_rgb)  # H, E, D
-    H, D = hed[...,0], hed[...,2]  # Hematoxylin, DAB (pozitívabb = erősebb festés)
+    # Optikai denzitás + HED szétválasztás (H=hematoxylin, E=eozin, D=DAB)
+    optical_density = -np.log((rgb.astype(np.float32) + 1) / 256.0)
+    hed_stains = skcolor.separate_stains(optical_density, skcolor.hed_from_rgb)
+    hematoxylin, dab = hed_stains[..., 0], hed_stains[..., 2]  # Hematoxylin, DAB (pozitívabb = erősebb festés)
 
     # Nucleus-maszk H-ból
-    Hn = cv2.GaussianBlur(H, (5,5), 0)
+    # Nucleus-maszk: hematoxylin csatorna elmosás + normalizálás + Otsu küszöb
+    h_blur = cv2.GaussianBlur(hematoxylin, (5, 5), 0)
     # Hn normalizálása 8 bitre
-    Hn_u8 = cv2.normalize(Hn, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    h_u8 = cv2.normalize(h_blur, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
     # Otsu küszöbölés 8-bites képen
-    _, th = cv2.threshold(Hn_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, thresh = cv2.threshold(h_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # Bináris maszk (0 vagy 1) a további lépésekhez
-    binmask = (th > 0).astype(np.uint8)
+    bin_mask = (thresh > 0).astype(np.uint8)
 
     # Morfológiai tisztítás
-    binmask = cv2.morphologyEx(binmask, cv2.MORPH_OPEN, np.ones((3,3),np.uint8), 2)
+    bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), 2)
 
     # marker-controlled watershed
-    dist = cv2.distanceTransform(binmask, cv2.DIST_L2, 5)
-    fg = (dist > 0.4*dist.max()).astype(np.uint8)
-    bg = cv2.dilate(binmask, np.ones((3,3),np.uint8), 3)
+    dist = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 5)
+    fg = (dist > 0.4 * dist.max()).astype(np.uint8)
+    bg = cv2.dilate(bin_mask, np.ones((3, 3), np.uint8), 3)
     unknown = cv2.subtract(bg, fg)
-    n, markers = cv2.connectedComponents(fg)
+    _, markers = cv2.connectedComponents(fg)
     markers = markers + 1
-    markers[unknown==1] = 0
+    markers[unknown == 1] = 0
     markers = cv2.watershed(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), markers)
 
-    # Per-blob DAB átlag
-    labels = np.unique(markers[(markers>1)])
-    feats, idx = [], []
-    for lb in labels:
-        m = (markers==lb)
-        if m.sum() < 80:    # kis zaj kiszűrés
+    # Per-blob DAB átlag jellemzők
+    labels = np.unique(markers[(markers > 1)])
+    feats, label_ids = [], []
+    for label_id in labels:
+        m = (markers == label_id)
+        if m.sum() < 80:  # kis zaj kiszűrés
             continue
-        feats.append([D[m].mean()])  # vagy több jellemző: [D.mean(), H.mean()]
-        idx.append(lb)
+        feats.append([dab[m].mean()])  # bővíthető pl. [dab.mean(), hematoxylin.mean()]
+        label_ids.append(label_id)
     feats = np.asarray(feats)
 
     km = None
     remap = None
     q = None
 
+    # Osztályozás: KMeans + DAB-erősség szerinti remap, vagy kvantilis küszöbök
     if method == "kmeans":
         km = KMeans(n_clusters=4, n_init=10, random_state=0).fit(feats)
-        cats = dict(zip(idx, km.labels_))
-        # rendezzük a klasztereket DAB erősség szerint
-        order = np.argsort([feats[km.labels_==i].mean() for i in range(4)])[::-1]
-        remap = {int(order[i]):i for i in range(4)}
-        cats = {lb: remap[c] for lb,c in cats.items()}
+        class_map = dict(zip(label_ids, km.labels_))
+        order = np.argsort([feats[km.labels_ == i].mean() for i in range(4)])[::-1]
+        remap = {int(order[i]): i for i in range(4)}
+        class_map = {lid: remap[c] for lid, c in class_map.items()}
     else:
-        # kvantilis küszöbök
-        q = np.quantile(feats[:,0], [0.25, 0.5, 0.75])
-        cats = {lb: (0 if v<=q[0] else 1 if v<=q[1] else 2 if v<=q[2] else 3)
-                for lb, v in zip(idx, feats[:,0])}
+        q = np.quantile(feats[:, 0], [0.25, 0.5, 0.75])
+        class_map = {
+            lid: (0 if v <= q[0] else 1 if v <= q[1] else 2 if v <= q[2] else 3)
+            for lid, v in zip(label_ids, feats[:, 0])
+        }
 
     #color_map = {0:(255,0,0), 1:(0,255,255), 2:(0,165,255), 3:(0,0,255)}  # kék, sárga, narancs, piros (BGR)
     color_map = {0:(255,0,0), 1:(0,255,255), 2:(0,128,255), 3:(0,0,255)}
-    out = bgr.copy()
-    contours_only = np.zeros_like(bgr)
-    contours_per_class = {
-        0: np.zeros_like(bgr),  # kék
-        1: np.zeros_like(bgr),  # citromsárga
-        2: np.zeros_like(bgr),  # narancs
-        3: np.zeros_like(bgr),  # piros
-    }
-    for lb in idx:
-        m = (markers == lb).astype(np.uint8)
-        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        cls = cats[lb]
-        col = color_map[cls]
-        cv2.drawContours(out, cnts, -1, col, thickness=2, lineType=cv2.LINE_AA)
-        cv2.drawContours(contours_only, cnts, -1, col, thickness=2, lineType=cv2.LINE_AA)
 
+    # Kontúrok rajzolása
+    segmented = bgr.copy()
+    contours_only = np.zeros_like(bgr)
+    for label_id in label_ids:
+        m = (markers == label_id).astype(np.uint8)
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        cls_id = class_map[label_id]
+        color = color_map[cls_id]
+        cv2.drawContours(segmented, cnts, -1, color, thickness=2, lineType=cv2.LINE_AA)
+        cv2.drawContours(contours_only, cnts, -1, color, thickness=2, lineType=cv2.LINE_AA)
+
+    # Maradék sejtek: minden-sejt maszkból vedd le a kontúrral fedetteket, majd osztályozd
     all_cells_mask = get_all_cell_mask(bgr)
     remaining_cells_mask = remove_blobs_overlapping_contours(all_cells_mask, contours_only, pad=2)
 
-    rem_cats, rem_overlay = classify_from_mask(
-        remaining_cells_mask, D, color_map, method, km=km, remap=remap, q=q, min_area=80
+    _, rem_overlay = classify_from_mask(
+        remaining_cells_mask, dab, color_map, method, km=km, remap=remap, q=q, min_area=80
     )
 
-    out_all = out.copy()
-    mask = cv2.cvtColor(rem_overlay, cv2.COLOR_BGR2GRAY) > 0
-    out_all[mask] = rem_overlay[mask]
+    # Overly összeolvasztása és mentés
+    out_all = segmented.copy()
+    overlay_mask = cv2.cvtColor(rem_overlay, cv2.COLOR_BGR2GRAY) > 0
+    out_all[overlay_mask] = rem_overlay[overlay_mask]
     cv2.imwrite(output_path, out_all)
 
 
